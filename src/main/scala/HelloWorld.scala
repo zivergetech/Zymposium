@@ -89,6 +89,56 @@ object Streaming extends ZIOAppDefault {
         }
       )
 
+    // ZIO[R, E, A]
+    // ZStream[R, E, A]
+
+    // In --> Processing --> Out
+    // Fan Out // broadcast operations
+
+    // In --> Processing1 --> Out
+    //    \-> Processing2 -/
+
+    // In == Stream
+    // () => A
+    // ZIO[R, E, A]
+    // ZStream[R, E, A]
+
+    // A => Z // one A value
+    // A => ZIO[R, E, B] == continuation
+    // zio.flatMap(f)
+
+    // A => Z // many A values
+    // ZSink
+
+    // final case class ZStream[-R, +E, +A](
+    //     process: ZManaged[R, E, ZIO[R, Option[E], A]]
+    // ) {
+
+    // Singleton Chunkifactory
+    def run[R1 <: R, E1 >: E, O](sink: ZSink[R1, E1, A, O]): ZIO[R1, E1, O] =
+      process.zip(sink.run).use { case (pull, push) =>
+        def loop: ZIO[R1, E1, O] =
+          pull.foldZIO(
+            {
+              case Some(e) => ZIO.fail(e)
+              case None =>
+                push(Chunk.empty).flatMap {
+                  case Some(o) => ZIO.succeed(o)
+                  case None =>
+                    ZIO.dieMessage(
+                      "Sink violated contract by returning None after being pushed empty Chunk"
+                    )
+                }
+            },
+            a =>
+              push(Chunk.single(a)).flatMap {
+                case Some(o) => ZIO.succeed(o)
+                case None    => loop
+              }
+          )
+        loop
+      }
+
     def runCollect: ZIO[R, E, Chunk[A]] =
       process.use { pull =>
         val builder = ChunkBuilder.make[A]
@@ -101,6 +151,34 @@ object Streaming extends ZIOAppDefault {
             a => ZIO.succeed(builder += a) *> loop // stream emitted an element
           )
         loop
+      }
+
+    import java.io.File
+    import java.io.FileWriter
+    import java.io.BufferedWriter
+
+    // Stream[R, A, String]
+    def runToFile(
+        name: String
+    )(implicit ev: A <:< String): ZIO[R, E, Unit] =
+      process.use { pull =>
+        ZIO.succeed(new File(name)).flatMap { file =>
+          ZIO.succeed(new BufferedWriter(new FileWriter(file))).flatMap {
+            writer =>
+              lazy val loop: ZIO[R, E, Unit] =
+                pull.foldZIO(
+                  {
+                    case Some(e) => ZIO.fail(e) // stream failed with an error
+                    case None    => ZIO.succeed(()) // stream end
+                  },
+                  a =>
+                    ZIO.succeed(
+                      writer.write(a)
+                    ) *> loop // stream emitted an element
+                )
+              loop.ensuring(ZIO.effectTotal(writer.close()))
+          }
+        }
       }
   }
 
@@ -141,11 +219,109 @@ object Streaming extends ZIOAppDefault {
       )
   }
 
+  // final case class ZStream[-R, +E, +A](
+  //     process: ZManaged[R, E, ZIO[R, Option[E], A]]
+  // ) {
+
+  type ??? = Nothing
+
+  // CHUNK WORLD is a world of chunks
+  // "Chunky" Monster
+
+  // Protocol
+
+  // Empty chunk of input means no more values
+  // Succeed with Some(O) means "I'm done with a summary value O"
+  // Succeed with None means "feed me more input"
+  // Fail with E means "I'm done with an error E"
+  //
+  // runCollect: ZSink[R, E, A, Chunk[A]]
+  // "Leftovers"
+
+  // trait StreamSupervisor[R, E, A, B] {
+  //   def run(stream: ZStream[R, E, A], sink: ZSink[R, E, A, B]): ZIO[R, E, B]
+  // }
+
+  final case class ZSink[-R, +E, -I, +O](
+      run: ZManaged[R, E, Chunk[I] => ZIO[R, E, Option[O]]]
+  ) { self =>
+
+    def zipWithPar[R1 <: R, E1 >: E, I1 <: I, O2, O3](
+        that: ZSink[R1, E1, I1, O2]
+    )(f: (O, O2) => O3): ZSink[R1, E1, I1, O3] = {
+
+      sealed trait State[+O, +O2]
+      case object Running extends State[Nothing, Nothing]
+      final case class LeftDone(o: O) extends State[O, Nothing]
+      final case class RightDone(o: O2) extends State[Nothing, O2]
+
+      ZSink {
+        self.run
+          .zipPar(that.run)
+          .zipPar(Ref.make[State[O, O2]](Running).toManaged)
+          .map { case (pushLeft, pushRight, ref) =>
+            in =>
+              ref.get.flatMap {
+                case Running =>
+                  pushLeft(in).zipPar(pushRight(in)).flatMap {
+                    case (Some(o), Some(o2)) => ZIO.succeed(Some(f(o, o2)))
+                    case (Some(o), None)     => ref.set(LeftDone(o)).as(None)
+                    case (None, Some(o2))    => ref.set(RightDone(o2)).as(None)
+                    case (None, None)        => ZIO.succeed(None)
+                  }
+                case LeftDone(o) =>
+                  pushRight(in).map {
+                    case Some(o2) => Some(f(o, o2))
+                    case None     => None
+                  }
+                case RightDone(o2) =>
+                  pushLeft(in).map {
+                    case Some(o) => Some(f(o, o2))
+                    case None     => None
+                  }
+ 
+              }
+          }
+      }
+    }
+  }
+
+  object ZSink {
+
+    def runCollect[A]: ZSink[Any, Nothing, A, Chunk[A]] =
+      ZSink {
+        Ref.make[Chunk[A]](Chunk.empty).toManaged.map { ref => in =>
+          if (in.isEmpty) ref.get.asSome
+          else ref.update(_ ++ in).as(None)
+        }
+      }
+
+    import java.io.BufferedWriter
+    import java.io.FileWriter
+
+    def writer(file: String): ZManaged[Any, Throwable, BufferedWriter] =
+      ZManaged
+        .make(
+          ZIO.effect(
+            new BufferedWriter(new FileWriter(file))
+          )
+        )(reader => ZIO.effectTotal(reader.close()))
+
+    def toFile(file: String): ZSink[Any, Throwable, String, Unit] =
+      ZSink {
+        writer(file).map { writer => in =>
+          if (in.isEmpty) ZIO.succeed(Some(()))
+          else
+            ZIO
+              .foreachDiscard(in)(s => ZIO.effectTotal(writer.write(s)))
+              .as(None)
+        }
+      }
+  }
+
   val myRealStream =
     ZStream.fromIterator(Iterator.fromList(List(1, 2, 3, 4, 6, 7)))
 
-  val run =
-    fileStream.runCollect
   // for {
   //   chunk <- myRealStream
   //     .tap(a => ZIO.debug(s"WOW $a"))
@@ -168,8 +344,30 @@ object Streaming extends ZIOAppDefault {
 
   lazy val fileStream =
     ZStream
-      .lines("./src/main/scala/cool.txt")
-      .tap(a => ZIO.debug(s"WOW $a").delay(1.second))
+      .lines("./src/main/scala/cool.txt") // in
+      .tap(a => ZIO.debug(s"WOW $a").delay(1.second)) // middle
+      .runCollect // end
+
+  val simpleStream =
+    ZStream.fromIterator(Iterator.fromList(List(1, 2, 3, 4, 6, 7)))
+
+  val simpleSink =
+    ZSink.runCollect[String]
+
+  val simpleSink2 =
+    ZSink.toFile("./src/main/scala/output.txt")
+
+  val notSoSimpleSink =
+    simpleSink.zipWithPar(simpleSink2) { case (l, _) => l }
+
+  lazy val simpleStreamProgram =
+    simpleStream.map(_ * 3).map(_.toString).run(notSoSimpleSink).debug
+
+  val run =
+    simpleStreamProgram
+
+  // fileStream
+  //     .runToFile("./src/main/scala/cool2.txt") // out
 
   // myFakeStream.delay(1.second) //Console.printLine("Hello, from ZIO!")
 
