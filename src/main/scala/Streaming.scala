@@ -414,7 +414,7 @@ object Channels {
     ): ZChannel[Env1, InErr, InElem, InDone, OutErr2, OutElem2, OutDone2] =
       ZChannel { upstream =>
         ZManaged.environment[Env].flatMap { environment =>
-          that.run(self.run(upstream).map(_.provide(environment)).provide(environment))
+          that.run(self.run(upstream).map(_.provideEnvironment(environment)).provideEnvironment(environment))
         }
       }
 
