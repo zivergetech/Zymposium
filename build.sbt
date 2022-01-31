@@ -1,4 +1,4 @@
-val zioVersion = "2.0.0-M4"
+val zioVersion = "2.0.0-RC1"
 
 libraryDependencies += "dev.zio" %% "zio" % zioVersion
 libraryDependencies += "dev.zio" %% "zio-streams" % zioVersion
