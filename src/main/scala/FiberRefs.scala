@@ -36,22 +36,27 @@ object FiberRefs extends ZIOAppDefault {
     } yield ()
 
   lazy val fiberRefExample: ZIO[Any, Nothing, Unit] =
-    for {
-      ref <- FiberRef.make("Zymposium")
-      kit = ref.locally("Kit")(ref.get.debug("KIT"))
-      adam = ref.locally("Adam")(ref.get.debug("ADAM"))
-      _ <- kit.zipPar(adam)
-      _ <- ref.get.debug("ZYMOSPHERE")
-    } yield ()
+    ZIO.scoped {
+      for {
+        ref <- FiberRef.make("Zymposium")
+        kit = ref.locally("Kit")(ref.get.debug("KIT"))
+        adam = ref.locally("Adam")(ref.get.debug("ADAM"))
+        _ <- kit.zipPar(adam)
+        _ <- ref.get.debug("ZYMOSPHERE")
+      } yield ()
+    }
 
-  lazy val forkedFibersExample: ZIO[Any, Nothing, Unit] =
-    for {
-      ref <- FiberRef.make[Map[String, String]](Map.empty, join = _ ++ _)
-      kit = ref.set(Map("Kit" -> "Cool"))
-      adam = ref.set(Map("Adam" -> "Nice!"))
-      _ <- kit.zipPar(adam)
-      _ <- ref.get.debug("Annotation Map")
-    } yield ()
+  lazy val forkedFibersExample: ZIO[Any, Nothing, Unit] = {
+    ZIO.scoped {
+      for {
+        ref <- FiberRef.make[Map[String, String]](Map.empty, join = _ ++ _)
+        kit = ref.set(Map("Kit" -> "Cool"))
+        adam = ref.set(Map("Adam" -> "Nice!"))
+        _ <- kit.zipPar(adam)
+        _ <- ref.get.debug("Annotation Map")
+      } yield ()
+    }
+  }
 
   // Log annotations
   // Log levels
@@ -144,9 +149,9 @@ object FiberRefs extends ZIOAppDefault {
     } yield ()
 
   val currentParallelism: FiberRef[Option[Int]] =
-    Runtime.default.unsafeRun(FiberRef.make[Option[Int]](None))
+    Runtime.default.unsafeRun(ZIO.scoped(FiberRef.make[Option[Int]](None)))
 
   val run =
-    loggingExample.provideCustom(Logging.live)
+    loggingExample.provide(Logging.live, Console.live, Scope.default)
 
 }

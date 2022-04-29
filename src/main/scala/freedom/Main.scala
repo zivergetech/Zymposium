@@ -4,8 +4,8 @@ package freedom
 // Isomorphisms
 
 final case class Isomorphism[A, B](
-    to: A => B,
-    from: B => A
+  to: A => B,
+  from: B => A
 )
 
 object Isomorphism {
@@ -43,7 +43,7 @@ object Folds {
     as.foldRight[List[A]](List.Empty)(List.Cons(_, _))
 
   object List {
-    case object Empty extends List[Nothing]
+    case object Empty                                extends List[Nothing]
     final case class Cons[A](head: A, tail: List[A]) extends List[A]
   }
 
@@ -83,7 +83,7 @@ object Folds {
     optionA.fold[Option[A]](Option.None)(Option.Some(_))
 
   object Option {
-    case object None extends Option[Nothing]
+    case object None                   extends Option[Nothing]
     final case class Some[A](value: A) extends Option[A]
   }
 
@@ -130,7 +130,7 @@ object Folds {
   }
 
   object Boolean {
-    case object True extends Boolean
+    case object True  extends Boolean
     case object False extends Boolean
   }
 
@@ -158,7 +158,7 @@ object Folds {
           ifSucc(nat(ifZero)(ifSucc))
       }
 
-    val Two = Succ(Succ(Zero))
+    val Two  = Succ(Succ(Zero))
     val Four = Succ(Succ(Succ(Succ(Zero))))
   }
 
@@ -180,10 +180,10 @@ object Folds {
     // B => B
     final case class Succ(nat: Nat) extends Nat
 
-    val One = Succ(Zero)
-    val Two = Succ(Succ(Zero))
+    val One   = Succ(Zero)
+    val Two   = Succ(Succ(Zero))
     val Three = Succ(Succ(Succ(Zero)))
-    val Four = Succ(Succ(Succ(Succ(Zero))))
+    val Four  = Succ(Succ(Succ(Succ(Zero))))
   }
 
 }
@@ -228,7 +228,7 @@ trait LayerLike[A] {
 sealed trait Layer[+A] extends Product with Serializable { self =>
 
   def fold[B](
-      ifValue: A => B
+    ifValue: A => B
   )(ifHorizontal: (B, B) => B)(ifVertical: (B, B) => B): B =
     self match {
       case Layer.Horizontal(left, right) =>
@@ -252,10 +252,9 @@ sealed trait Layer[+A] extends Product with Serializable { self =>
 }
 
 object Layer {
-  final case class Horizontal[A](left: Layer[A], right: Layer[A])
-      extends Layer[A]
-  final case class Vertical[A](left: Layer[A], right: Layer[A]) extends Layer[A]
-  final case class Value[A](value: A) extends Layer[A]
+  final case class Horizontal[A](left: Layer[A], right: Layer[A]) extends Layer[A]
+  final case class Vertical[A](left: Layer[A], right: Layer[A])   extends Layer[A]
+  final case class Value[A](value: A)                             extends Layer[A]
 }
 
 final case class Graph[A](nodes: List[Node[A]]) {
@@ -322,9 +321,9 @@ object Examples {
 
   def main(args: Array[String]): Unit = {
     val layer: Layer[Expr] = graph.build(List(Type("C")))
-    val expr = layer.fold[Expr](identity)(_ ++ _)(_ >>> _)
-    val used = layer.fold[List[Expr]](a => List(a))(_ ++ _)(_ ++ _)
-    val count = used.length
+    val expr               = layer.fold[Expr](identity)(_ ++ _)(_ >>> _)
+    val used               = layer.fold[List[Expr]](a => List(a))(_ ++ _)(_ ++ _)
+    val count              = used.length
     println(layer)
     println(expr.string)
     println(used)

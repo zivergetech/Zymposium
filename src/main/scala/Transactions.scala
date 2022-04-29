@@ -190,11 +190,6 @@ object Transactions extends ZIOAppDefault {
           self.releaseSTM *> that.releaseSTM
       }
 
-    final def lockManaged: ZManaged[Any, Nothing, Unit] =
-      ZManaged.acquireRelease(acquireSTM.commit)(releaseSTM.commit)
-
-    final def withLock[R, E, A](zio: ZIO[R, E, A]): ZIO[R, E, A] =
-      lockManaged.use(_ => zio)
   }
 
   sealed trait LockStatus

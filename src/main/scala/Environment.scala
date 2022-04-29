@@ -45,7 +45,7 @@ object Environment extends ZIOAppDefault {
   // 5. Wire your layers together to run your application
 
   // package logging
-  
+
   trait WorldCrusher {
     def crush: UIO[Unit]
   }
@@ -53,15 +53,18 @@ object Environment extends ZIOAppDefault {
   object WorldCrusher {
     def crush = ZIO.serviceWithZIO[WorldCrusher](_.crush)
 
-    val live = (WorldCrusherLive.apply _).toLayer[WorldCrusher]
+    val live = ZLayer.fromFunction(WorldCrusherLive.apply _)
   }
 
   case class GemOfPower(powerLevel: Int)
 
-  case class WorldCrusherLive(console: Console, logging: Logging, gem: GemOfPower) extends WorldCrusher {
+  case class WorldCrusherLive(
+      console: Console,
+      logging: Logging,
+      gem: GemOfPower
+  ) extends WorldCrusher {
     def crush = logging.logLine(s"CRUSH! CRUSH! CRUSH! ${gem}")
   }
-
 
   trait Logging {
     // 1. GENERALLY USE EFFECTS
@@ -118,17 +121,17 @@ object Environment extends ZIOAppDefault {
       ZIO.unit
 
     val layer: URLayer[Console with Clock, ConsoleLogging] =
-      (ConsoleLogging.apply _).toLayer
+      ZLayer.fromFunction(ConsoleLogging.apply _)
 
     val manualSolidLayerPatternForAllCases
         : ZLayer[Console with Clock, Nothing, Logging] =
-      ZLayer {
+      ZLayer.scoped {
         for {
-          _ <- ZIO.debug("BLENDING BEGINETH!").toManaged_
-          _ <- registerLoggingService.toManaged_
-          console <- ZManaged.service[Console]
-          clock <- ZManaged.service[Clock]
-          _ <- ZManaged.finalizer(ZIO.debug("BLENDING COMPLETE!"))
+          _ <- ZIO.debug("BLENDING BEGINETH!")
+          _ <- registerLoggingService
+          console <- ZIO.service[Console]
+          clock <- ZIO.service[Clock]
+          _ <- ZIO.addFinalizer(ZIO.debug("BLENDING COMPLETE!"))
         } yield ConsoleLogging(console, clock)
       }
   }
@@ -136,8 +139,16 @@ object Environment extends ZIOAppDefault {
   val myZIO: ZIO[Logging & WorldCrusher, Nothing, Unit] =
     for {
       _ <- Logging.logLine("Hello")
-      _ <- ZIO.serviceWithZIO[Logging](_.logLine("Hello from a more verbose implementation"))
-      _ <- ZIO.environment[Logging & WorldCrusher].flatMap(environment => environment.get[Logging].logLine("Hello from an even more verbose implementation"))
+      _ <- ZIO.serviceWithZIO[Logging](
+        _.logLine("Hello from a more verbose implementation")
+      )
+      _ <- ZIO
+        .environment[Logging & WorldCrusher]
+        .flatMap(environment =>
+          environment
+            .get[Logging]
+            .logLine("Hello from an even more verbose implementation")
+        )
       _ <- WorldCrusher.crush
     } yield ()
 
@@ -149,15 +160,15 @@ object Environment extends ZIOAppDefault {
     )
 
   val gemLayer = ZLayer.succeed(GemOfPower(9001))
-  
+
   val effect = myZIO.provide(
-      ConsoleLogging.layer, 
-      Console.live, 
-      Clock.live,
-      WorldCrusher.live,
-      gemLayer
-    )
+    ConsoleLogging.layer,
+    Console.live,
+    Clock.live,
+    WorldCrusher.live,
+    gemLayer
+  )
 
   val run =
-    myZIO.provideCustom(fullLayer, WorldCrusher.live, gemLayer)
+    myZIO.provide(Console.live, fullLayer, WorldCrusher.live, gemLayer)
 }
