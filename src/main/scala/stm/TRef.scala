@@ -1,8 +1,12 @@
 package stm
 
+import java.util.concurrent.atomic.AtomicReference
+
 trait TRef[A] { self =>
 
   @volatile var versioned: Versioned[A]
+
+  val todos: AtomicReference[Map[TransactionId, ToDo]]
 
   def get: STM[A] =
     STM.Transaction { journal =>
@@ -24,6 +28,7 @@ object TRef {
       val versioned0 = new Versioned(a)
       val tRef = new TRef[A] {
         @volatile var versioned = versioned0
+        val todos = new AtomicReference(Map.empty[TransactionId, ToDo])
       }
       val entry = Entry.make(tRef)
       journal.put(tRef, entry)
