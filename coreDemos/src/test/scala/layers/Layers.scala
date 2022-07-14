@@ -4,6 +4,7 @@ import zio.Console.printLine
 import zio.test.ExecutionEvent.RuntimeFailure
 import zio.test.{ExecutionEvent, ExecutionEventSink, SuiteId, TestFailure}
 import zio._
+import zio.logging._
 
 case class ExpensiveService(calls: Ref[Int]) {
   def call() =
@@ -41,7 +42,7 @@ object CheapService {
 }
 
 object Layers {
-  val expensive: ZLayer[Any, Nothing, AverageService] = ZLayer.scoped {
+  val average: ZLayer[Any, Nothing, AverageService] = ZLayer.scoped {
     for {
       counter <- Ref.make(0)
       service <-
@@ -70,7 +71,7 @@ object Layers {
       counter <- Ref.make(0)
       service <-
         ZIO.acquireRelease(
-           printLine(s"Constructing medium layer $name").orDie *>  ZIO.succeed(CheapService(counter))
+           ZIO.logError(s"Constructing medium layer $name") *>  ZIO.succeed(CheapService(counter))
         )(service => for {
           finalCount <- service.calls.get
           _ <- printLine(s"Releasing medium layer $name after $finalCount calls").orDie
@@ -79,18 +80,21 @@ object Layers {
     } yield service
   }
 
-  val mega: ZLayer[Any, Nothing, ExpensiveService] = ZLayer.scoped {
+  val expensive: ZLayer[Any, Nothing, ExpensiveService] = ZLayer.scoped {
     for {
       counter <- Ref.make(0)
       service <-
         ZIO.acquireRelease(
-          printLine(s"Constructing mega layer").orDie *> ZIO.sleep(3.seconds).withClock(Clock.ClockLive) *> ZIO.succeed(ExpensiveService(counter))
+          ZIO.logError(s"Constructing mega layer") *> ZIO.sleep(3.seconds).withClock(Clock.ClockLive) *> ZIO.succeed(ExpensiveService(counter))
         )(service => for {
           finalCount <- service.calls.get
-          _ <- ZIO.debug(s"Releasing mega layer after $finalCount calls")
+          _ <- ZIO.logError(s"Releasing mega layer after $finalCount calls")
         } yield ()
         )
     } yield service
   }
 
+  lazy val coloredLogger = {
+    Runtime.removeDefaultLoggers >>> console(LogFormat.colored)
+  }
 }

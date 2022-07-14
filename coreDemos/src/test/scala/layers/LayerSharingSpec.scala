@@ -27,7 +27,7 @@ object ServiceForEverySpec extends ZIOSpecDefault {
     suite("uses a shared layer")(
       Tools.simpleTest("A"),
       Tools.simpleTest("B"),
-    ).provideShared(Layers.cheap("X"))
+    ).provideShared(Layers.cheap("X") ++ Layers.coloredLogger)
 
 }
 
@@ -37,16 +37,15 @@ object IntraSpecSharingSpec extends ZIOSpecDefault {
     suite("uses a shared layer")(
       test("A")(
         for {
-          _ <- ZIO.unit
+          _ <- AverageService.call()
         } yield assertCompletes
       ),
       test("B")(
         for {
-          _ <- ZIO.service[AverageService]
-          _ <- ZIO.unit
+          _ <- AverageService.call()
         } yield assertCompletes
       ),
-    ).provideShared(Layers.expensive)
+    ).provideShared(Layers.average)
 
 }
 object ProvidedToEachTestSpec extends ZIOSpecDefault {
@@ -57,12 +56,12 @@ object ProvidedToEachTestSpec extends ZIOSpecDefault {
         for {
           _ <- AverageService.call()
         } yield assertCompletes
-      ).provide(Layers.expensive),
+      ).provide(Layers.average),
       test("B")(
         for {
           _ <- AverageService.call()
         } yield assertCompletes
-      ).provide(Layers.expensive),
+      ).provide(Layers.average),
     )
 
 }
@@ -82,12 +81,12 @@ object ProvidedUnsharedToSuiteSpec extends ZIOSpecDefault {
           _ <- ZIO.unit
         } yield assertCompletes
       ),
-    ).provide(Layers.expensive)
+    ).provide(Layers.average)
 
 }
 
 object NestedSpecsWithMixedSharingSpec extends ZIOSpec[ExpensiveService] {
-  val bootstrap = Layers.mega
+  val bootstrap = Layers.expensive
 
   def spec =
     suite("X: uses a shared layer")(
@@ -110,7 +109,7 @@ object NestedSpecsWithMixedSharingSpec extends ZIOSpec[ExpensiveService] {
 
 
 object NestedSpecsWithMixedSharing2Spec extends ZIOSpec[ExpensiveService] {
-  val bootstrap = Layers.mega
+  val bootstrap = Layers.expensive
 
   def spec =
     suite("Y: uses a shared layer")(
