@@ -27,7 +27,17 @@ object ServiceForEverySpec extends ZIOSpecDefault {
     suite("uses a shared layer")(
       Tools.simpleTest("A"),
       Tools.simpleTest("B"),
-    ).provideShared(Layers.cheap("X") ++ Layers.coloredLogger)
+    ).provide(Layers.cheap("X") ++ Layers.coloredLogger)
+
+}
+
+object LogSpec extends ZIOSpecDefault {
+  def spec =
+    suite("uses a shared layer")(
+      test("log something")(
+        ZIO.logError("should be red").map(_ => assertCompletes)
+      )
+    ).provide(Layers.coloredLogger)
 
 }
 

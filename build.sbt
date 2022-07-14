@@ -28,6 +28,6 @@ lazy val coreDemos = (project in (file("coreDemos")))
     libraryDependencies += "dev.zio"                      %% "zio"           % coreDemosZioVersion,
     libraryDependencies += "dev.zio"                      %% "zio-test"      % coreDemosZioVersion % Test,
     libraryDependencies += "dev.zio"                      %% "zio-test-sbt"      % coreDemosZioVersion % Test,
-    libraryDependencies += "dev.zio"                      %% "zio-logging"           % zioVersion % Test,
+    libraryDependencies += "dev.zio"                      %% "zio-logging"           % coreDemosZioVersion,
     testFrameworks := Seq(new TestFramework("zio.test.sbt.ZTestFramework"))
   )
