@@ -1,0 +1,3 @@
+package xio
+
+object Main {}
