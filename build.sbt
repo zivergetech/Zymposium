@@ -17,3 +17,14 @@ lazy val zioFromScratch = (project in file("sessions/zio-from-scratch"))
     libraryDependencies ++= Seq()
   )
   .settings(sharedSettings: _*)
+
+lazy val shardCakeDemo = (project in file("sessions/shardcake-demo"))
+  .settings(
+    name := "shardcake-demo",
+    libraryDependencies ++= Seq(
+      "dev.zio"        %% "zio"                     % "2.0.3",
+      "com.devsisters" %% "shardcake-manager"       % "2.0.4",
+      "com.devsisters" %% "shardcake-protocol-grpc" % "2.0.4"
+    )
+  )
+  .settings(sharedSettings: _*)
