@@ -1,9 +1,10 @@
 Global / onChangedBuildSource := ReloadOnSourceChanges
-val zioVersion = "2.0.2"
+
+val zioVersion = "2.0.5"
 
 val sharedSettings =
   Seq(
-    scalaVersion := "2.13.8"
+    scalaVersion := "3.2.0"
   )
 
 lazy val root = (project in file("."))
@@ -25,6 +26,16 @@ lazy val shardCakeDemo = (project in file("sessions/shardcake-demo"))
       "dev.zio"        %% "zio"                     % "2.0.3",
       "com.devsisters" %% "shardcake-manager"       % "2.0.4",
       "com.devsisters" %% "shardcake-protocol-grpc" % "2.0.4"
+    )
+  )
+  .settings(sharedSettings: _*)
+
+lazy val zioDirectDemo = (project in file("sessions/zio-direct-demo"))
+  .settings(
+    name := "zio-direct-demo",
+    libraryDependencies ++= Seq(
+      "dev.zio" %% "zio" % "2.0.5",
+      "dev.zio" %% "zio-direct" % "1.0.0-RC1"
     )
   )
   .settings(sharedSettings: _*)
