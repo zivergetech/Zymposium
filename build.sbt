@@ -39,3 +39,12 @@ lazy val zioDirectDemo = (project in file("sessions/zio-direct-demo"))
     )
   )
   .settings(sharedSettings: _*)
+
+lazy val webCrawler = (project in file("sessions/web-crawler"))
+  .settings(
+    name := "zio-direct-demo",
+    libraryDependencies ++= Seq(
+      "dev.zio" %% "zio" % zioVersion,
+    )
+  )
+  .settings(sharedSettings: _*)
