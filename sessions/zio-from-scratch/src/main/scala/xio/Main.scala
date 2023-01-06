@@ -5,21 +5,46 @@ import scala.annotation.tailrec
 // What is a ZIO?
 // - workflow, description, blueprint, recipe.
 
+// DISCORD LINK:  https://discord.gg/z3hJJ9Me
+//
 // √ nano-actor runtime
 // √ forking
 // √ first introduce the typed error channel
 // - generalize it to include "cause" including defects and interruption
 // - support interrupting a workflow and getting its result
+//
 // - interruptible masks/regions
+
+// object LexicalScoping extends App {
+//   val x = 1
+//   {
+//     val x = 2
+//     {
+//       val x = 1
+//       println("inner " + x) // 1
+//     }
+//     println("middle " + x) // 2
+//   }
+//   println("outer " + x) // 1
+// }
 
 // Previous contract was a ZIO[A] is a workflow that will eventually produce an A
 // New contract is a ZIO[E, A] is a workflow that will eventually either succeed
 // with an A or fail with an E.
 
+// A ZIO is a workflow that will either succeed with an A or fail with an Cause[E]
+
+// Cause[E]
+// Fail(e: E)
+// Interrupt(fiberId: FiberId)
+
 trait ZIO[+E, +A] { self =>
 
   def catchAll[E2, A1 >: A](handler: E => ZIO[E2, A1]): ZIO[E2, A1] =
     self.foldZIO(handler, ZIO.succeed(_))
+
+  def catchAllCause[E2, A1 >: A](handler: Cause[E] => ZIO[E2, A1]): ZIO[E2, A1] =
+    self.foldCauseZIO(handler, ZIO.succeed(_))
 
   // - composes workflows sequentially
   // - allowing the second to depend upon the result of the first
@@ -27,6 +52,17 @@ trait ZIO[+E, +A] { self =>
     ZIO.FlatMap(self, f)
 
   def foldZIO[E2, B](onFailure: E => ZIO[E2, B], onSuccess: A => ZIO[E2, B]): ZIO[E2, B] =
+    foldCauseZIO(
+      cause =>
+        cause match {
+          case Cause.Fail(e)   => onFailure(e)
+          case Cause.Interrupt => ZIO.failCause(Cause.interrupt)
+          case Cause.Die(t)    => ZIO.failCause(Cause.die(t))
+        },
+      onSuccess
+    )
+
+  def foldCauseZIO[E2, B](onFailure: Cause[E] => ZIO[E2, B], onSuccess: A => ZIO[E2, B]): ZIO[E2, B] =
     ZIO.Fold(self, onFailure, onSuccess)
 
   def fork: ZIO[Nothing, Fiber[E, A]] =
@@ -52,10 +88,10 @@ trait ZIO[+E, +A] { self =>
     // EVIL BAD CODE
     val latch              = new java.util.concurrent.CountDownLatch(1)
     var result: Exit[E, A] = null.asInstanceOf[Exit[E, A]]
-    val workflow = self.foldZIO(
-      e =>
+    val workflow = self.foldCauseZIO(
+      cause =>
         ZIO.succeed {
-          result = Exit.Failure(e)
+          result = Exit.Failure(cause)
           latch.countDown()
         },
       a =>
@@ -89,13 +125,19 @@ object ZIO {
   def succeed[A](a: => A): ZIO[Nothing, A] =
     ZIO.Succeed(() => a)
 
+  def die(t: Throwable): ZIO[Nothing, Nothing] =
+    ZIO.failCause(Cause.die(t))
+
   def fail[E](e: => E): ZIO[E, Nothing] =
-    ZIO.Fail(() => e)
+    failCause(Cause.fail(e))
+
+  def failCause[E](cause: Cause[E]): ZIO[E, Nothing] =
+    ZIO.Fail(() => cause)
 
   def done[E, A](exit: Exit[E, A]): ZIO[E, A] =
     exit match {
-      case Exit.Success(a) => succeed(a)
-      case Exit.Failure(e) => fail(e)
+      case Exit.Success(a)     => succeed(a)
+      case Exit.Failure(cause) => failCause(cause)
     }
 
   // import async code into zio
@@ -120,11 +162,11 @@ object ZIO {
 
   private[zio] final case class Async[E, A](register: (ZIO[E, A] => Unit) => Unit) extends ZIO[E, A]
 
-  private[zio] final case class Fail[E](e: () => E) extends ZIO[E, Nothing]
+  private[zio] final case class Fail[E](e: () => Cause[E]) extends ZIO[E, Nothing]
 
   private[zio] final case class Fold[E, E2, A, B](
     first: ZIO[E, A],
-    onFailure: E => ZIO[E2, B],
+    onFailure: Cause[E] => ZIO[E2, B],
     onSuccess: A => ZIO[E2, B]
   ) extends ZIO[E2, B]
 }
@@ -163,20 +205,22 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
   }
 
   object Continuation {
-    case class OnSuccess(onSuccess: Any => ZIO[Any, Any]) extends Continuation 
+    case class OnSuccess(onSuccess: Any => ZIO[Any, Any]) extends Continuation
 
-    case class OnSuccessAndFailure(
-      onFailure: Any => ZIO[Any, Any], 
-      onSuccess: Any => ZIO[Any, Any]) extends Continuation
+    case class OnSuccessAndFailure(onFailure: Any => ZIO[Any, Any], onSuccess: Any => ZIO[Any, Any])
+        extends Continuation
   }
 
   // Either an A or an E
   private var result: Exit[E, A]                     = null.asInstanceOf[Exit[E, A]]
   private var observers: Set[Exit[Any, Any] => Unit] = Set.empty
   // Stack of "continuations" (A => ZIO[Any, Any])
-  private val stack                                  = scala.collection.mutable.Stack.empty[Continuation]
+  private val stack = scala.collection.mutable.Stack.empty[Continuation]
 
   private var currentZIO: ZIO[Any, Any] = zio.asInstanceOf[ZIO[Any, Any]]
+
+  def eraseContinuation[E, A, B](f: A => ZIO[E, B]): Any => ZIO[Any, Any] =
+    f.asInstanceOf[Any => ZIO[Any, Any]]
 
   def offerToInbox(message: FiberMessage): Unit = {
     inbox.add(message)
@@ -188,6 +232,7 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
   def drainQueueOnNewExecutor(): Unit =
     executor.execute(() => drainQueueOnCurrentExecutor())
 
+  // More info in Episode One!
   @tailrec
   def drainQueueOnCurrentExecutor(): Unit = {
     val fiberMessage = inbox.poll() // FiberMessage or null
@@ -226,21 +271,22 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
   def runLoop(): Unit = {
     var loop = true
     while (loop)
-      currentZIO match {
-        case ZIO.Succeed(a) =>
+      try currentZIO match {
+        case ZIO.Succeed(thunk) =>
+          val a = thunk()
           if (stack.isEmpty) {
-            result = Exit.Success(a().asInstanceOf[A])
+            result = Exit.Success(a.asInstanceOf[A])
             loop = false
             observers.foreach(observer => observer(result))
             observers = Set.empty
           } else {
             val continuation = stack.pop()
-            currentZIO = continuation.onSuccess(a())
+            currentZIO = continuation.onSuccess(a)
           }
 
         case ZIO.FlatMap(first, andThen) =>
           currentZIO = first
-          stack.push(Continuation.OnSuccess(andThen))
+          stack.push(Continuation.OnSuccess(eraseContinuation(andThen)))
 
         case ZIO.Async(register) =>
           currentZIO = null
@@ -251,23 +297,27 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
 
         case ZIO.Fold(first, onFailure, onSuccess) =>
           currentZIO = first
-          stack.push(Continuation.OnSuccessAndFailure(onFailure, onSuccess))
+          stack.push(Continuation.OnSuccessAndFailure(eraseContinuation(onFailure), eraseContinuation(onSuccess)))
 
-        case ZIO.Fail(e) =>
+        case ZIO.Fail(thunk) =>
+          val cause = thunk()
           val continuation = findNextErrorHandler()
           if (continuation == null) {
-            result = Exit.Failure(e().asInstanceOf[E])
+            result = Exit.Failure(cause.asInstanceOf[Cause[E]])
             loop = false
             observers.foreach(observer => observer(result))
             observers = Set.empty
           } else {
-            currentZIO = continuation.onFailure(e())
+            currentZIO = continuation.onFailure(cause)
           }
+      } catch {
+        case t: Throwable =>
+          currentZIO = ZIO.die(t)
       }
   }
 
   def findNextErrorHandler(): Continuation.OnSuccessAndFailure = {
-    var loop = true
+    var loop                                           = true
     var continuation: Continuation.OnSuccessAndFailure = null
     while (loop) {
       val cont = stack.pop()
@@ -310,8 +360,27 @@ object FiberMessage {
 sealed trait Exit[+E, +A]
 
 object Exit {
-  final case class Success[A](a: A) extends Exit[Nothing, A]
-  final case class Failure[E](e: E) extends Exit[E, Nothing]
+  final case class Success[A](a: A)        extends Exit[Nothing, A]
+  final case class Failure[E](e: Cause[E]) extends Exit[E, Nothing]
+}
+
+sealed trait Cause[+E]
+
+// ZIO[Nothing, Int] = ZIO.succeed(2 + 2 / 0))
+
+object Cause {
+
+  final case class Fail[E](error: E)         extends Cause[E]
+  final case class Die(throwable: Throwable) extends Cause[Nothing]
+  case object Interrupt                      extends Cause[Nothing]
+
+  def interrupt: Cause[Nothing] =
+    Interrupt
+
+  def fail[E](e: E): Cause[E] =
+    Fail(e)
+
+  def die(throwable: Throwable): Cause[Nothing] = Die(throwable)
 }
 
 object Example extends App {
@@ -339,20 +408,36 @@ object Example extends App {
   // myThirdWorkflow.unsafeRunSync()
   // myParallelWorkflow.unsafeRunSync()
 
+  // interrupt
   val myFailingWorkflow =
-    ZIO.succeed("yay")
+    ZIO
+      .succeed("yay")
       .flatMap(a => ZIO.succeed(println("success: " + a)))
       .flatMap(_ => ZIO.fail("whoops"))
       .flatMap(_ => ZIO.succeed(println("Done something else")))
       .flatMap(_ => ZIO.succeed(println("Done something else")))
-      .catchAll { e => ZIO.succeed(println(s"Error: ${e}"))} 
+      .catchAll(e => ZIO.succeed(println(s"Error: ${e}")))
+  // 1. print success yay
+  // 2. print Error: whoops
 
-
-  myFailingWorkflow.unsafeRunSync()
+  // myFailingWorkflow.unsafeRunSync()
 
   // classical imperative code
   // val int = getInt
   // printInt(int)
 
   //randomIntWorkflow.unsafeRunSync()
+
+  def debug(any: Any): ZIO[Nothing, Unit] = {
+    ZIO.succeed(println(s"debug: $any"))
+  }
+
+  // - interrupt
+  // - succeed
+  val causeExample =
+    ZIO
+      .succeed(throw new RuntimeException("boom"))
+      .catchAllCause(cause => debug(s"caught cause $cause"))
+
+  causeExample.unsafeRunSync()
 }
