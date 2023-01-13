@@ -10,10 +10,10 @@ import scala.annotation.tailrec
 // √ nano-actor runtime
 // √ forking
 // √ first introduce the typed error channel
-// - generalize it to include "cause" including defects and interruption
-// - support interrupting a workflow and getting its result
-//
+// √ generalize it to include "cause" including defects and interruption
+// √ support interrupting a workflow and getting its result
 // - interruptible masks/regions
+// - finalizers?
 
 // object LexicalScoping extends App {
 //   val x = 1
@@ -39,6 +39,9 @@ import scala.annotation.tailrec
 // Interrupt(fiberId: FiberId)
 
 trait ZIO[+E, +A] { self =>
+
+  def *>[E1 >: E, B](that: => ZIO[E1, B]): ZIO[E1, B] =
+    self.flatMap(_ => that)
 
   def catchAll[E2, A1 >: A](handler: E => ZIO[E2, A1]): ZIO[E2, A1] =
     self.foldZIO(handler, ZIO.succeed(_))
@@ -71,6 +74,9 @@ trait ZIO[+E, +A] { self =>
       fiber.unsafeStart()
       fiber
     }
+
+  def forever: ZIO[E, Nothing] =
+    self *> self.forever
 
   // allows us to transform the  value inside of a workflow
   def map[B](f: A => B): ZIO[E, B] =
@@ -134,6 +140,9 @@ object ZIO {
   def failCause[E](cause: Cause[E]): ZIO[E, Nothing] =
     ZIO.Fail(() => cause)
 
+  val interrupt: ZIO[Nothing, Nothing] =
+    ZIO.failCause(Cause.interrupt)
+
   def done[E, A](exit: Exit[E, A]): ZIO[E, A] =
     exit match {
       case Exit.Success(a)     => succeed(a)
@@ -143,6 +152,9 @@ object ZIO {
   // import async code into zio
   def async[E, A](register: (ZIO[E, A] => Unit) => Unit): ZIO[E, A] =
     Async(register)
+
+  val never: ZIO[Nothing, Nothing] =
+    async(_ => ())
 
   // def readFileAsync(callback: String => Unit): Unit =
   //   ???
@@ -177,9 +189,20 @@ object ZIO {
 //
 // Fiber is an executing ZIO blueprint.
 trait Fiber[+E, +A] {
+
   // wait for execution to complete, and return the result... as a blueprint
   // semantic blocking. it will not ACTUALLY block an OS thread.
-  def join: ZIO[E, A]
+  def await: ZIO[Nothing, Exit[E, A]]
+
+  // send the interrupt signal to fiber and then return immediately
+  def interruptFork: ZIO[Nothing, Unit]
+
+  final def join: ZIO[E, A] =
+    await.flatMap(ZIO.done)
+
+  // wait for interruption to be processed by fiber
+  def interrupt: ZIO[Nothing, Exit[E, A]] =
+    interruptFork *> await
 }
 
 // NANO ACTOR!
@@ -264,81 +287,106 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
       case FiberMessage.Resume(zio) =>
         currentZIO = zio
         runLoop()
+
+      case FiberMessage.Interrupt =>
+        if (result eq null) {
+          // fiber is still running
+          currentZIO = ZIO.interrupt
+          runLoop()
+        } else {
+          // fiber is already done
+          ()
+        }
     }
+
+  val yieldOpCount = 300
 
   // var result
   // var observers
   def runLoop(): Unit = {
-    var loop = true
-    while (loop)
-      try currentZIO match {
-        case ZIO.Succeed(thunk) =>
-          val a = thunk()
-          if (stack.isEmpty) {
-            result = Exit.Success(a.asInstanceOf[A])
+    var opCount = 0
+    var loop    = true
+    while (loop) {
+      opCount += 1
+      if (opCount == yieldOpCount) {
+        opCount = 0
+        loop = false
+        val zio = currentZIO
+        currentZIO = null
+        offerToInbox(FiberMessage.Resume(zio))
+
+      } else {
+        try currentZIO match {
+          case ZIO.Succeed(thunk) =>
+            val a = thunk()
+            if (stack.isEmpty) {
+              result = Exit.Success(a.asInstanceOf[A])
+              loop = false
+              observers.foreach(observer => observer(result))
+              observers = Set.empty
+            } else {
+              val continuation = stack.pop()
+              currentZIO = continuation.onSuccess(a)
+            }
+
+          case ZIO.FlatMap(first, andThen) =>
+            currentZIO = first
+            stack.push(Continuation.OnSuccess(eraseContinuation(andThen)))
+
+          case ZIO.Async(register) =>
+            currentZIO = null
             loop = false
-            observers.foreach(observer => observer(result))
-            observers = Set.empty
-          } else {
-            val continuation = stack.pop()
-            currentZIO = continuation.onSuccess(a)
-          }
+            register { zio =>
+              offerToInbox(FiberMessage.Resume(zio))
+            }
 
-        case ZIO.FlatMap(first, andThen) =>
-          currentZIO = first
-          stack.push(Continuation.OnSuccess(eraseContinuation(andThen)))
+          case ZIO.Fold(first, onFailure, onSuccess) =>
+            currentZIO = first
+            stack.push(Continuation.OnSuccessAndFailure(eraseContinuation(onFailure), eraseContinuation(onSuccess)))
 
-        case ZIO.Async(register) =>
-          currentZIO = null
-          loop = false
-          register { zio =>
-            offerToInbox(FiberMessage.Resume(zio))
-          }
-
-        case ZIO.Fold(first, onFailure, onSuccess) =>
-          currentZIO = first
-          stack.push(Continuation.OnSuccessAndFailure(eraseContinuation(onFailure), eraseContinuation(onSuccess)))
-
-        case ZIO.Fail(thunk) =>
-          val cause = thunk()
-          val continuation = findNextErrorHandler()
-          if (continuation == null) {
-            result = Exit.Failure(cause.asInstanceOf[Cause[E]])
-            loop = false
-            observers.foreach(observer => observer(result))
-            observers = Set.empty
-          } else {
-            currentZIO = continuation.onFailure(cause)
-          }
-      } catch {
-        case t: Throwable =>
-          currentZIO = ZIO.die(t)
+          case ZIO.Fail(thunk) =>
+            val cause        = thunk()
+            val continuation = findNextErrorHandler()
+            if (continuation == null) {
+              result = Exit.Failure(cause.asInstanceOf[Cause[E]])
+              loop = false
+              observers.foreach(observer => observer(result))
+              observers = Set.empty
+            } else {
+              currentZIO = continuation.onFailure(cause)
+            }
+        } catch {
+          case t: Throwable =>
+            currentZIO = ZIO.die(t)
+        }
       }
+    }
   }
 
   def findNextErrorHandler(): Continuation.OnSuccessAndFailure = {
     var loop                                           = true
     var continuation: Continuation.OnSuccessAndFailure = null
-    while (loop) {
-      val cont = stack.pop()
-      if (cont == null) {
+    while (loop)
+      if (stack.isEmpty) {
         loop = false
       } else {
-        cont match {
+        stack.pop() match {
           case onSuccessAndFailure @ Continuation.OnSuccessAndFailure(_, _) =>
             continuation = onSuccessAndFailure
             loop = false
           case _ =>
         }
       }
-    }
     continuation
   }
 
-  def join: ZIO[E, A] =
+  def await: ZIO[Nothing, Exit[E, A]] =
     ZIO.async { cb =>
-      unsafeAddObserver(exit => cb(ZIO.done(exit)))
+      unsafeAddObserver(exit => cb(ZIO.succeed(exit)))
     }
+
+  def interruptFork: ZIO[Nothing, Unit] =
+    ZIO.succeed(offerToInbox(FiberMessage.Interrupt))
 
   def unsafeStart(): Unit =
     offerToInbox(FiberMessage.Start)
@@ -354,6 +402,7 @@ object FiberMessage {
 
   case object Start                                        extends FiberMessage
   final case class AddObserver(cb: Exit[Any, Any] => Unit) extends FiberMessage
+  case object Interrupt                                    extends FiberMessage
   final case class Resume(zio: ZIO[Any, Any])              extends FiberMessage
 }
 
@@ -428,9 +477,8 @@ object Example extends App {
 
   //randomIntWorkflow.unsafeRunSync()
 
-  def debug(any: Any): ZIO[Nothing, Unit] = {
+  def debug(any: Any): ZIO[Nothing, Unit] =
     ZIO.succeed(println(s"debug: $any"))
-  }
 
   // - interrupt
   // - succeed
@@ -439,5 +487,32 @@ object Example extends App {
       .succeed(throw new RuntimeException("boom"))
       .catchAllCause(cause => debug(s"caught cause $cause"))
 
-  causeExample.unsafeRunSync()
+  // causeExample.unsafeRunSync()
+
+  val selfInterruptionExample =
+    ZIO.interrupt
+
+  // external interruption
+
+  // val exit = selfInterruptionExample.unsafeRunSync()
+  // println(exit)
+
+  val readLine: ZIO[Nothing, String] =
+    for {
+      _      <- ZIO.succeed(print("> "))
+      result <- ZIO.succeed(scala.io.StdIn.readLine())
+    } yield result
+
+  val interruptionExample1 =
+    for {
+      _     <- debug("Starting")
+      fiber <- debug(".").forever.fork
+      _     <- debug("Forked")
+      _     <- speakWithDelay("Hello")(3000)
+      _     <- fiber.interrupt
+    } yield ()
+
+  val exit = interruptionExample1.unsafeRunSync()
+
+  println("exit = " + exit)
 }
