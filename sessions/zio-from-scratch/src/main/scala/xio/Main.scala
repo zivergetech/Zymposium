@@ -78,6 +78,10 @@ trait ZIO[+E, +A] { self =>
   def forever: ZIO[E, Nothing] =
     self *> self.forever
 
+  def repeatN(n: Int): ZIO[E, A] =
+    if (n <= 0) self
+    else self *> self.repeatN(n - 1)
+
   // allows us to transform the  value inside of a workflow
   def map[B](f: A => B): ZIO[E, B] =
     self.flatMap(a => ZIO.succeed(f(a)))
@@ -119,6 +123,7 @@ trait ZIO[+E, +A] { self =>
       a     <- left.join
       b     <- right.join
     } yield f(a, b)
+
 }
 
 object ZIO {
@@ -143,6 +148,9 @@ object ZIO {
   val interrupt: ZIO[Nothing, Nothing] =
     ZIO.failCause(Cause.interrupt)
 
+  val unit: ZIO[Nothing, Unit] =
+    ZIO.succeed(())
+
   def done[E, A](exit: Exit[E, A]): ZIO[E, A] =
     exit match {
       case Exit.Success(a)     => succeed(a)
@@ -155,6 +163,31 @@ object ZIO {
 
   val never: ZIO[Nothing, Nothing] =
     async(_ => ())
+
+  def updateRuntimeFlags(f: RuntimeFlags => RuntimeFlags): ZIO[Nothing, Unit] =
+    UpdateRuntimeFlags(f)
+
+  def uninterruptible[E, A](zio: ZIO[E, A]): ZIO[E, A] =
+    withRuntimeFlags { flags =>
+      if (flags.isInterruptible)
+        setUninterruptible.flatMap { _ =>
+          zio.foldCauseZIO(
+            cause => setInterruptible *> ZIO.failCause(cause),
+            a => setInterruptible *> ZIO.succeed(a)
+          )
+        }
+      else 
+        zio
+      }
+
+  val setInterruptible: ZIO[Nothing, Unit] =
+    updateRuntimeFlags(_ + RuntimeFlag.Interruptible)
+
+  val setUninterruptible: ZIO[Nothing, Unit] =
+    updateRuntimeFlags(_ - RuntimeFlag.Interruptible)
+
+  def withRuntimeFlags[E, A](f: RuntimeFlags => ZIO[E, A]): ZIO[E, A] =
+    WithRuntimeFlags(f)
 
   // def readFileAsync(callback: String => Unit): Unit =
   //   ???
@@ -181,6 +214,11 @@ object ZIO {
     onFailure: Cause[E] => ZIO[E2, B],
     onSuccess: A => ZIO[E2, B]
   ) extends ZIO[E2, B]
+
+  // FUTURE ZYMPOSIUM: Patch DSL
+  private[zio] final case class UpdateRuntimeFlags(f: RuntimeFlags => RuntimeFlags) extends ZIO[Nothing, Unit]
+
+  private[zio] final case class WithRuntimeFlags[E, A](f: RuntimeFlags => ZIO[E, A]) extends ZIO[E, A]
 }
 
 // ZIO is a blueprint. We can compose it with other blueprints.
@@ -216,12 +254,17 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
   private val executor =
     scala.concurrent.ExecutionContext.global
 
-  //
+  private var runtimeFlags =
+    RuntimeFlags.default
+
   private val inbox =
     new java.util.concurrent.ConcurrentLinkedQueue[FiberMessage]
 
   private val running: java.util.concurrent.atomic.AtomicBoolean =
     new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  private var interruptedCause: Option[Cause[Nothing]] =
+    None
 
   sealed trait Continuation {
     def onSuccess: Any => ZIO[Any, Any]
@@ -241,6 +284,12 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
   private val stack = scala.collection.mutable.Stack.empty[Continuation]
 
   private var currentZIO: ZIO[Any, Any] = zio.asInstanceOf[ZIO[Any, Any]]
+
+  def isInterruptible(): Boolean =
+    runtimeFlags.isInterruptible
+
+  def isInterrupted(): Boolean =
+    interruptedCause.isDefined
 
   def eraseContinuation[E, A, B](f: A => ZIO[E, B]): Any => ZIO[Any, Any] =
     f.asInstanceOf[Any => ZIO[Any, Any]]
@@ -285,16 +334,30 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
         }
 
       case FiberMessage.Resume(zio) =>
-        currentZIO = zio
-        runLoop()
-
-      case FiberMessage.Interrupt =>
-        if (result eq null) {
-          // fiber is still running
-          currentZIO = ZIO.interrupt
+        if (result == null) {
+          currentZIO = zio
           runLoop()
         } else {
-          // fiber is already done
+          // println(s"attempted to resume zio $zio a fiber that IS done $result")
+        }
+
+      case FiberMessage.Interrupt =>
+        interruptedCause = Some(Cause.interrupt)
+        if (isInterruptible()) {
+          if (result eq null) {
+            // fiber is still running
+            currentZIO = ZIO.interrupt
+            runLoop()
+          } else {
+            // fiber is already done
+            ()
+          }
+        } else {
+          // what is our logic if we are not interruptible?
+          // don't interrupt ourselves right now
+          // but when we exit uninterruptible region need to interrupt ourselves
+          // we need to keep track of some additional information to "remember"
+          // that we have been interrupted
           ()
         }
     }
@@ -307,14 +370,13 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
     var opCount = 0
     var loop    = true
     while (loop) {
+      // println(s"opCount: $opCount")
       opCount += 1
       if (opCount == yieldOpCount) {
-        opCount = 0
         loop = false
         val zio = currentZIO
         currentZIO = null
         offerToInbox(FiberMessage.Resume(zio))
-
       } else {
         try currentZIO match {
           case ZIO.Succeed(thunk) =>
@@ -355,8 +417,27 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
             } else {
               currentZIO = continuation.onFailure(cause)
             }
+
+          case ZIO.UpdateRuntimeFlags(patch) =>
+            val updatedRuntimeFlags = patch(runtimeFlags)
+            if (updatedRuntimeFlags == runtimeFlags) {
+              currentZIO = ZIO.unit
+            } else {
+              runtimeFlags = updatedRuntimeFlags
+              if (isInterrupted() && isInterruptible()) {
+                currentZIO = ZIO.failCause(interruptedCause.get)
+              } else {
+                currentZIO = ZIO.unit
+              }
+
+            }
+
+          case ZIO.WithRuntimeFlags(f) =>
+            currentZIO = f(runtimeFlags)
+
         } catch {
           case t: Throwable =>
+            println(s"Caught a throwable in runLoop: $t")
             currentZIO = ZIO.die(t)
         }
       }
@@ -432,6 +513,27 @@ object Cause {
   def die(throwable: Throwable): Cause[Nothing] = Die(throwable)
 }
 
+final case class RuntimeFlags(set: Set[RuntimeFlag]) {
+  def contains(flag: RuntimeFlag): Boolean = set.contains(flag)
+
+  def isInterruptible: Boolean = set.contains(RuntimeFlag.Interruptible)
+
+  def +(runtimeFlag: RuntimeFlag) =
+    copy(set = set + runtimeFlag)
+
+  def -(runtimeFlag: RuntimeFlag) =
+    copy(set = set - runtimeFlag)
+}
+
+object RuntimeFlags {
+  val default: RuntimeFlags = RuntimeFlags(Set(RuntimeFlag.Interruptible))
+}
+
+sealed trait RuntimeFlag
+object RuntimeFlag {
+  case object Interruptible extends RuntimeFlag
+}
+
 object Example extends App {
 
   val randomIntWorkflow       = ZIO.succeed(scala.util.Random.nextInt(99))
@@ -497,12 +599,6 @@ object Example extends App {
   // val exit = selfInterruptionExample.unsafeRunSync()
   // println(exit)
 
-  val readLine: ZIO[Nothing, String] =
-    for {
-      _      <- ZIO.succeed(print("> "))
-      result <- ZIO.succeed(scala.io.StdIn.readLine())
-    } yield result
-
   val interruptionExample1 =
     for {
       _     <- debug("Starting")
@@ -512,7 +608,35 @@ object Example extends App {
       _     <- fiber.interrupt
     } yield ()
 
-  val exit = interruptionExample1.unsafeRunSync()
+  val example =
+    for {
+      fiber <- ZIO.never.fork
+      _     <- debug("Forked")
+      _     <- speakWithDelay("Hello")(3000)
+      _     <- fiber.interrupt
+    } yield ()
+
+  // val exit = interruptionExample1.unsafeRunSync()
+
+  val child =
+    for {
+      _ <- ZIO.uninterruptible {
+             speakWithDelay("child is running in uninterruptible region")(2000) *>
+               debug(".").repeatN(1000)
+           }
+      _ <- debug("*").forever
+    } yield ()
+
+  val initialRegionsExample =
+    for {
+      fiber <- child.fork
+      _     <- speakWithDelay("waiting")(1000)
+      _     <- debug("about to interrupt child")
+      _ <- fiber.interrupt // interrupt = interruptFork *> await
+      _ <- debug("done interrupting child")
+    } yield ()
+
+  val exit = initialRegionsExample.unsafeRunSync()
 
   println("exit = " + exit)
 }
