@@ -12,8 +12,10 @@ import scala.annotation.tailrec
 // √ first introduce the typed error channel
 // √ generalize it to include "cause" including defects and interruption
 // √ support interrupting a workflow and getting its result
-// - interruptible masks/regions
-// - finalizers?
+// √ interruptible masks/regions
+// √ finalizers?
+// - FiberRef (key)
+// - Environment
 
 // object LexicalScoping extends App {
 //   val x = 1
@@ -49,6 +51,12 @@ trait ZIO[+E, +A] { self =>
   def catchAllCause[E2, A1 >: A](handler: Cause[E] => ZIO[E2, A1]): ZIO[E2, A1] =
     self.foldCauseZIO(handler, ZIO.succeed(_))
 
+  def ensuring(finalizer: ZIO[Nothing, Any]): ZIO[E, A] =
+    self.foldCauseZIO(
+      cause => finalizer *> ZIO.failCause(cause),
+      a => finalizer *> ZIO.succeed(a)
+    )
+
   // - composes workflows sequentially
   // - allowing the second to depend upon the result of the first
   def flatMap[E1 >: E, B](f: A => ZIO[E1, B]): ZIO[E1, B] =
@@ -69,11 +77,14 @@ trait ZIO[+E, +A] { self =>
     ZIO.Fold(self, onFailure, onSuccess)
 
   def fork: ZIO[Nothing, Fiber[E, A]] =
-    ZIO.succeed {
-      val fiber = FiberRuntime(self)
-      fiber.unsafeStart()
-      fiber
-    }
+    ZIO.ModifyFiberRefs { fiberRefs =>
+      val effect = ZIO.succeed {
+        val fiber = FiberRuntime(self, fiberRefs)
+        fiber.unsafeStart()
+        fiber
+      }
+      (effect, fiberRefs)
+    }.flatMap(identity)
 
   def forever: ZIO[E, Nothing] =
     self *> self.forever
@@ -89,7 +100,7 @@ trait ZIO[+E, +A] { self =>
   // fire and forget
   // procrastination driven development
   def unsafeRunAsync(): Unit = {
-    val fiber = FiberRuntime(self)
+    val fiber = FiberRuntime(self, Map.empty)
     fiber.unsafeStart()
   }
 
@@ -171,14 +182,60 @@ object ZIO {
     withRuntimeFlags { flags =>
       if (flags.isInterruptible)
         setUninterruptible.flatMap { _ =>
-          zio.foldCauseZIO(
-            cause => setInterruptible *> ZIO.failCause(cause),
-            a => setInterruptible *> ZIO.succeed(a)
-          )
+          zio.ensuring(setInterruptible)
         }
-      else 
+      else
         zio
+    }
+
+  sealed trait InterruptibilityRestorer {
+    def apply[E, A](zio: ZIO[E, A]): ZIO[E, A]
+  }
+
+  object InterruptibilityRestorer {
+    def make(originallyInterruptible: Boolean): InterruptibilityRestorer =
+      new InterruptibilityRestorer {
+        def apply[E, A](zio: ZIO[E, A]): ZIO[E, A] =
+          if (originallyInterruptible) interruptible(zio)
+          else uninterruptible(zio)
       }
+  }
+
+  def uninterruptibleMask[E, A](f: InterruptibilityRestorer => ZIO[E, A]): ZIO[E, A] =
+    withRuntimeFlags { flags =>
+      val restore = InterruptibilityRestorer.make(flags.isInterruptible)
+      uninterruptible(f(restore))
+    }
+
+  def interruptible[E, A](zio: ZIO[E, A]): ZIO[E, A] =
+    withRuntimeFlags { flags =>
+      if (!flags.isInterruptible)
+        setInterruptible.flatMap { _ =>
+          zio.ensuring(setUninterruptible)
+        }
+      else
+        zio
+    }
+
+  // acquire is uninterruptible
+  // release is uninterruptible
+  // use is interruptible
+  def acquireReleaseExitWith[E, A, B](
+    acquire: ZIO[E, A]
+  )(release: (A, Exit[E, B]) => ZIO[Nothing, Any])(use: A => ZIO[E, B]): ZIO[E, B] =
+    ZIO.uninterruptibleMask { restore =>
+      acquire.flatMap { a =>
+        restore(use(a))
+          .foldCauseZIO(
+            cause => release(a, Exit.Failure(cause)) *> ZIO.failCause(cause),
+            b => release(a, Exit.Success(b)) *> ZIO.succeed(b)
+          )
+      }
+    }
+
+  // ZIO.uninterruptible {
+  //   ZIO.acquireReleaseExitWith(???)(???)(???)
+  // }
 
   val setInterruptible: ZIO[Nothing, Unit] =
     updateRuntimeFlags(_ + RuntimeFlag.Interruptible)
@@ -219,6 +276,9 @@ object ZIO {
   private[zio] final case class UpdateRuntimeFlags(f: RuntimeFlags => RuntimeFlags) extends ZIO[Nothing, Unit]
 
   private[zio] final case class WithRuntimeFlags[E, A](f: RuntimeFlags => ZIO[E, A]) extends ZIO[E, A]
+
+  private[zio] final case class ModifyFiberRefs[A](f: Map[FiberRef[_], Any] => (A, Map[FiberRef[_], Any]))
+      extends ZIO[Nothing, A]
 }
 
 // ZIO is a blueprint. We can compose it with other blueprints.
@@ -245,7 +305,7 @@ trait Fiber[+E, +A] {
 
 // NANO ACTOR!
 // Akka to ZIO in a different way
-final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =>
+final case class FiberRuntime[E, A](zio: ZIO[E, A], fiberRefs0: Map[FiberRef[_], Any]) extends Fiber[E, A] { self =>
   // each fiber/thread should contain a single linear chain of execution
   // other paralell/concurrent processes interact with this fiber via messages
   //
@@ -265,6 +325,9 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
 
   private var interruptedCause: Option[Cause[Nothing]] =
     None
+
+  private var fiberRefs: Map[FiberRef[_], Any] =
+    fiberRefs0
 
   sealed trait Continuation {
     def onSuccess: Any => ZIO[Any, Any]
@@ -435,6 +498,11 @@ final case class FiberRuntime[E, A](zio: ZIO[E, A]) extends Fiber[E, A] { self =
           case ZIO.WithRuntimeFlags(f) =>
             currentZIO = f(runtimeFlags)
 
+          case ZIO.ModifyFiberRefs(f) =>
+            val (a, updatedFiberRefs) = f(fiberRefs)
+            fiberRefs = updatedFiberRefs
+            currentZIO = ZIO.succeed(a)
+
         } catch {
           case t: Throwable =>
             println(s"Caught a throwable in runLoop: $t")
@@ -532,6 +600,34 @@ object RuntimeFlags {
 sealed trait RuntimeFlag
 object RuntimeFlag {
   case object Interruptible extends RuntimeFlag
+}
+
+sealed trait FiberRef[A] { self =>
+  def default: A
+
+  def modify[B](f: A => (B, A)): ZIO[Nothing, B] =
+    ZIO.ModifyFiberRefs { fiberRefs =>
+      val currentValue        = fiberRefs.getOrElse(self, default).asInstanceOf[A]
+      val (summary, newValue) = f(currentValue)
+      (summary, fiberRefs.updated(self, newValue))
+    }
+
+  def set(a: A): ZIO[Nothing, Unit] =
+    modify(_ => ((), a))
+
+  def update(f: A => A): ZIO[Nothing, Unit] =
+    modify(a => ((), f(a)))
+
+  def get: ZIO[Nothing, A] =
+    modify(a => (a, a))
+
+}
+
+object FiberRef {
+  def make[A](initial: A): ZIO[Nothing, FiberRef[A]] =
+    ZIO.succeed(new FiberRef[A] {
+      def default: A = initial
+    })
 }
 
 object Example extends App {
@@ -636,7 +732,52 @@ object Example extends App {
       _ <- debug("done interrupting child")
     } yield ()
 
-  val exit = initialRegionsExample.unsafeRunSync()
+  // val exit = initialRegionsExample.unsafeRunSync()
 
-  println("exit = " + exit)
+  // println("exit = " + exit)
+
+  def sleep(ms: Int) =
+    ZIO.succeed {
+      Thread.sleep(ms)
+    }
+
+  val myResource =
+    ZIO.acquireReleaseExitWith {
+      ZIO.succeed(println("acquired"))
+    } { (_, exit) =>
+      ZIO.succeed(println(s"released with $exit"))
+    } { _ =>
+      ZIO.succeed(println("using")) *> ZIO.never
+    }
+
+  val myResourceExample =
+    for {
+      fiber <- myResource.fork
+      _     <- sleep(1000)
+      _     <- fiber.interrupt
+      _     <- ZIO.succeed(println("done"))
+    } yield ()
+
+  // myResourceExample.unsafeRunSync()
+
+  def useFiberRef(fiberRef: FiberRef[Int]) =
+    for {
+      _ <- fiberRef.update(_ + 1)
+      _ <- fiberRef.update(_ + 1)
+      value <- fiberRef.modify { a =>
+                 (a, a + 1)
+               }
+      _ <- ZIO.succeed(println(value))
+    } yield ()
+
+  val myFiberRefExample =
+    for {
+      fiberRef <- FiberRef.make(0)
+      _        <- fiberRef.set(1)
+      f1 <- useFiberRef(fiberRef).fork // 2
+      f2 <- useFiberRef(fiberRef).fork // 2
+      _ <- useFiberRef(fiberRef)       // 3
+    } yield ()
+
+  myFiberRefExample.unsafeRunSync()
 }
