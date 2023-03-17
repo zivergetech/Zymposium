@@ -58,3 +58,14 @@ lazy val zioOpenAIDemo = (project in file("sessions/zio-openai-demo"))
     )
   )
   .settings(sharedSettings: _*)
+
+lazy val propertyBasedTesting = (project in file("sessions/property-based-testing"))
+  .settings(
+    name := "property-based-testing",
+    libraryDependencies ++= Seq(
+      "dev.zio" %% "zio" % zioVersion,
+      "dev.zio" %% "zio-streams" % zioVersion,
+    )
+  )
+  .settings(sharedSettings: _*)
+
