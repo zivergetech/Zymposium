@@ -69,3 +69,13 @@ lazy val propertyBasedTesting = (project in file("sessions/property-based-testin
   )
   .settings(sharedSettings: _*)
 
+lazy val fiberRefs = (project in file("sessions/fiber-refs"))
+  .settings(
+    name := "fiber-refs",
+    libraryDependencies ++= Seq(
+      "dev.zio" %% "zio" % zioVersion,
+      "dev.zio" %% "zio-streams" % zioVersion,
+    )
+  )
+  .settings(sharedSettings: _*)
+
