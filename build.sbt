@@ -1,10 +1,10 @@
 Global / onChangedBuildSource := ReloadOnSourceChanges
 
-val zioVersion = "2.0.8"
+val zioVersion = "2.0.15"
 
 val sharedSettings =
   Seq(
-    scalaVersion := "3.2.0"
+    scalaVersion := "3.3.0"
   )
 
 lazy val root = (project in file("."))
@@ -75,6 +75,16 @@ lazy val fiberRefs = (project in file("sessions/fiber-refs"))
     libraryDependencies ++= Seq(
       "dev.zio" %% "zio" % zioVersion,
       "dev.zio" %% "zio-streams" % zioVersion,
+    )
+  )
+  .settings(sharedSettings: _*)
+
+lazy val reloadableServices = (project in file("sessions/reloadable-services"))
+  .settings(
+    name := "reloadable-services",
+    libraryDependencies ++= Seq(
+      "dev.zio" %% "zio" % zioVersion,
+      "dev.zio" %% "zio-macros" % zioVersion,
     )
   )
   .settings(sharedSettings: _*)
