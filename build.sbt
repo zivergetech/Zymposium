@@ -89,3 +89,11 @@ lazy val reloadableServices = (project in file("sessions/reloadable-services"))
   )
   .settings(sharedSettings: _*)
 
+lazy val actors = (project in file("sessions/actors"))
+  .settings(
+    name := "actors",
+    libraryDependencies ++= Seq(
+      "dev.zio" %% "zio" % zioVersion,
+    )
+  )
+  .settings(sharedSettings: _*)
