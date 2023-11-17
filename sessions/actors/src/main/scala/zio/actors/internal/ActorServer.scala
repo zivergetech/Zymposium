@@ -5,17 +5,13 @@ import zio.http._
 
 object ActorServer {
 
-  val send =
-    Endpoints.send.implement {
-      Handler.fromFunctionZIO[(Long, ActorRequest)] { case (id: Long, actorRequest: ActorRequest) =>
-        ZIO.dieMessage("Not implemented")
-      }
-    }
+  val send = Endpoints.send.implement(handler(ActorSystemService.send))
   
-  val ask =
-    Endpoints.ask.implement {
-      Handler.fromFunctionZIO[(Long, ActorRequest)] { case (id: Long, actorRequest: ActorRequest) =>
-        ZIO.dieMessage("Not implemented")
-      }
-    }
+  val ask = Endpoints.ask.implement(handler(ActorSystemService.ask))
+
+  val routes =
+    Routes(send, ask)
+
+  val app: HttpApp[ActorSystemService] =
+    routes.toHttpApp
 }
