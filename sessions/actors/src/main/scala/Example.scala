@@ -1,5 +1,6 @@
 import zio._
 import zio.actors._
+import zio.schema._
 
 // Plan
 // Goal: we can send a message to an ActorRef from an ActorSystem in one process
@@ -25,16 +26,29 @@ object Example {
   sealed trait TemperatureMessage[+Response]
 
   object TemperatureMessage {
-    final case class SetTemperature(value: Double) extends TemperatureMessage[Unit]
-    case object GetTemperature                     extends TemperatureMessage[Double]
+    final case class SetTemperature(value: Double) extends TemperatureMessage[TemperatureResponse.SetTemperature.type]
+    case object GetTemperature                     extends TemperatureMessage[TemperatureResponse.GetTemperature]
+
+    implicit val schema: Schema[TemperatureMessage[TemperatureResponse]] =
+      DeriveSchema.gen[TemperatureMessage[TemperatureResponse]]
+  }
+
+  sealed trait TemperatureResponse
+
+  object TemperatureResponse {
+    case object SetTemperature               extends TemperatureResponse
+    case class GetTemperature(value: Double) extends TemperatureResponse
+
+    implicit val schema: Schema[TemperatureResponse] =
+      DeriveSchema.gen[TemperatureResponse]
   }
 
   def makeTemperatureActor(actorSystem: ActorSystem): ZIO[Any, Nothing, ActorRef[TemperatureMessage]] =
-    actorSystem.make(0.0) {
+    actorSystem.make[Any, Double, TemperatureMessage, TemperatureResponse](0.0) {
       case (state, TemperatureMessage.SetTemperature(value)) =>
-        ZIO.succeed(value -> ())
+        ZIO.succeed(value -> TemperatureResponse.SetTemperature)
       case (state, TemperatureMessage.GetTemperature) =>
-        ZIO.succeed(state -> state)
+        ZIO.succeed(state -> TemperatureResponse.GetTemperature(state))
     }
 }
 
