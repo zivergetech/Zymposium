@@ -94,6 +94,7 @@ lazy val actors = (project in file("sessions/actors"))
     name := "actors",
     libraryDependencies ++= Seq(
       "dev.zio" %% "zio" % zioVersion,
+      "dev.zio" %% "zio-http" % "3.0.0-RC3"
     )
   )
   .settings(sharedSettings: _*)
