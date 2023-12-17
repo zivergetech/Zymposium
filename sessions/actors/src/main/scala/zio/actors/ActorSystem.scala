@@ -9,7 +9,7 @@ trait ActorSystem {
   def make[Environment, State, Message[+Response], Response](s: State)(
     f: (State, Message[Response]) => ZIO[Environment, Nothing, (State, Response)]
   )(implicit requestSchema: Schema[Message[Response]], responseSchema: Schema[Response]): ZIO[Environment, Nothing, ActorRef[Message]]
-  private[actors] def unsafeMake[Message[+Response], Response](actorId: ActorId): ZIO[Any, Nothing, ActorRef[Message]]
+  def unsafeMake[Message[+Response], Response](actorId: ActorId)(implicit requestSchema: Schema[Message[Response]], responseSchema: Schema[Response]): ZIO[Any, Nothing, ActorRef[Message]]
 }
 
 object ActorSystem {
@@ -21,11 +21,12 @@ object ActorSystem {
       serverConfig = Server.Config.default.binding(config.host, config.port)
       location     = Location(config.host, config.port)
       counter     <- Ref.make(0L)
-      actors      <- Ref.make[Map[LocalId, (Actor[_], Schema[_], Schema[_])]](Map.empty)
+      actors      <- ActorsState.make
       _ <- Server
              .serve(ActorServer.app)
              .provide(ActorSystemService.live, Server.live, ZLayer.succeed(serverConfig), ZLayer.succeed(actors))
              .forkScoped
+      actorClient <- scope.extend((Client.default >>> ActorClient.live).build.map(_.get)).orDie
     } yield new ActorSystem {
       def make[Environment, State, Message[+Response], Response](s: State)(
         f: (State, Message[Response]) => ZIO[Environment, Nothing, (State, Response)]
@@ -40,7 +41,7 @@ object ActorSystem {
           def ask[Response](message: Message[Response]): ZIO[Any, Nothing, Response] =
             actor.ask(message)
         }
-      def unsafeMake[Message[+Response], Response](actorId: ActorId): ZIO[Any, Nothing, ActorRef[Message]] =
+      def unsafeMake[Message[+Response], Response](actorId: ActorId)(implicit requestSchema: Schema[Message[Response]], responseSchema: Schema[Response]): ZIO[Any, Nothing, ActorRef[Message]] =
         ZIO.succeed {
           new ActorRef[Message] {
             def send(message: Message[Any]): ZIO[Any, Nothing, Unit] =
@@ -52,7 +53,7 @@ object ActorSystem {
                   }
                 }
               else
-                ???
+                actorClient.send(actorId, message)(requestSchema.asInstanceOf[Schema[Message[Any]]])
             def ask[Response](message: Message[Response]): ZIO[Any, Nothing, Response] =
               if (actorId.location == location)
                 actors.get.flatMap { map =>
@@ -62,7 +63,7 @@ object ActorSystem {
                   }
                 }
               else
-                ???
+                actorClient.ask(actorId, message)(requestSchema.asInstanceOf[Schema[Message[Response]]], responseSchema.asInstanceOf[Schema[Response]])
           }
         }
     }

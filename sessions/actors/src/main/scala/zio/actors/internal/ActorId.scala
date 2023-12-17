@@ -1,3 +1,7 @@
 package zio.actors.internal
 
-final case class ActorId(location: Location, localId: LocalId)
+import zio.http._
+
+final case class ActorId(location: Location, localId: LocalId) {
+  def url: URL = url"http://${location.host}:${location.port}"
+}
