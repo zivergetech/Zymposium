@@ -9,8 +9,10 @@ object ActorServer {
   
   val ask = Endpoints.ask.implement(handler(ActorSystemService.ask))
 
+  val health = Endpoints.health.implement(handler(ZIO.succeed("OK")))
+
   val routes =
-    Routes(send, ask)
+    Routes(send, ask, health)
 
   val app: HttpApp[ActorSystemService] =
     routes.toHttpApp

@@ -64,3 +64,32 @@ object Actors extends ZIOAppDefault {
       _           <- Console.printLine(s"Temperature is $temp")
     } yield ()
 }
+
+object Node1 extends ZIOAppDefault {
+  import Example._
+
+  val run =
+    for {
+      actorSystem <- ActorSystem.make("localhost", 8080)
+      actor       <- makeTemperatureActor(actorSystem)
+      _           <- Console.readLine("Press enter to continue")
+    } yield ()
+}
+
+object Node2 extends ZIOAppDefault {
+  import Example._
+  import zio.actors.internal._
+
+  val run =
+    for {
+      actorSystem <- ActorSystem.make("localhost", 8081)
+      location     = Location("localhost", 8080)
+      localId      = LocalId(0)
+      actorId      = ActorId(location, localId)
+      actor       <- actorSystem.unsafeMake[TemperatureMessage, TemperatureResponse](actorId)
+      _           <- actor ! TemperatureMessage.SetTemperature(42.0)
+      temp        <- actor ? TemperatureMessage.GetTemperature
+      _           <- Console.printLine(s"Temperature is $temp")
+    } yield ()
+
+}

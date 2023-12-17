@@ -12,13 +12,13 @@ trait ActorSystemService {
 
 object ActorSystemService {
 
-  val live: ZLayer[Ref[Map[LocalId, (Actor[_], Schema[_], Schema[_])]], Nothing, ActorSystemService] =
+  val live: ZLayer[ActorsState, Nothing, ActorSystemService] =
     ZLayer {
       for {
-        actors <- ZIO.service[Ref[Map[LocalId, (Actor[_], Schema[_], Schema[_])]]]
+        actors <- ZIO.service[ActorsState]
       } yield new ActorSystemService {
         def send(id: LocalId, actorRequest: ActorRequest): ZIO[Any, Nothing, Unit] =
-          actors.get.flatMap { map =>
+          ZIO.debug(s"Server received send $id $actorRequest") *> actors.get.flatMap { map =>
             map.get(id) match {
               case Some((actor, requestSchema, _)) =>
                 val requestBinaryCodec = JsonCodec.schemaBasedBinaryCodec(requestSchema)
@@ -28,23 +28,23 @@ object ActorSystemService {
                 }
               case None => ZIO.dieMessage(s"Actor with id $id does not exist")
             }
-          }
+          }.debug(s"Server sent send $id $actorRequest")
         def ask(id: LocalId, actorRequest: ActorRequest): ZIO[Any, Nothing, ActorResponse] =
-          actors.get.flatMap { map =>
+          ZIO.debug(s"Server received ask $id $actorRequest") *> actors.get.flatMap { map =>
             map.get(id) match {
               case Some((actor, requestSchema, responseSchema)) =>
                 val requestBinaryCodec = JsonCodec.schemaBasedBinaryCodec(requestSchema)
                 requestBinaryCodec.decode(actorRequest.value) match {
                   case Left(error)    => ZIO.dieMessage(error.toString)
-                  case Right(message) => actor.asInstanceOf[Actor[AnyMessage]].ask(message).map { response =>
-                    val responseBinaryCodec = JsonCodec.schemaBasedBinaryCodec(responseSchema)
+                  case Right(message) => actor.asInstanceOf[Actor[AnyMessage]].ask(message).map { (response: Any) =>
+                    val responseBinaryCodec = JsonCodec.schemaBasedBinaryCodec(responseSchema.asInstanceOf[Schema[Any]])
                     val value = responseBinaryCodec.encode(response)
                     ActorResponse(value)
                   }
                 }
               case None => ZIO.dieMessage(s"Actor with id $id does not exist")
             }
-          }
+          }.debug(s"Server sent ask $id $actorRequest")
       }
     }
 

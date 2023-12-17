@@ -12,4 +12,7 @@ object Endpoints {
 
   val ask =
     Endpoint(Method.POST / "actors" / localId / "ask").in[ActorRequest].out[ActorResponse]
+
+  val health =
+    Endpoint(Method.GET / "health").out[String]
 }
